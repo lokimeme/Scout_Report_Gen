@@ -2,11 +2,13 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 import io
-import os 
+import os
+from scipy.stats import percentileofscore
 
 class PlayerStats:
-    def __init__(self, name, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg):
+    def __init__(self, name, pos, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg):
         self.name = name
+        self.position = pos
         self.points_per_game = ppg
         self.assists_per_game = apg
         self.turnovers_per_game = tov
@@ -19,17 +21,14 @@ class PlayerStats:
 def get_player_stats_df(year=2024):
     cache_filename = f"nba_stats_{year}.csv"
 
-    # Check if the cached file already exists
     if os.path.exists(cache_filename):
         print(f"Loading data from local cache: {cache_filename}")
         try:
-            # If it exists, load it directly from the CSV and return
             df = pd.read_csv(cache_filename)
             return df
         except Exception as e:
             print(f"Error reading cache file: {e}. Will re-scrape the data.")
 
-    # If cache doesn't exist, proceed with scraping
     print(f"No local cache found for {year}. Scraping data from Basketball-Reference...")
     try:
         url = f"https://www.basketball-reference.com/leagues/NBA_{year}_per_game.html"
@@ -38,13 +37,11 @@ def get_player_stats_df(year=2024):
         
         df = pd.read_html(io.StringIO(response.text), attrs={'id': 'per_game_stats'})[0]
         
-        # Data Cleaning
         df = df.drop(df[df['Player'] == 'Player'].index)
         df = df.fillna(0)
+        # Add 'Pos' to the columns being processed
         stat_cols = ['PTS', 'AST', 'TOV', '3P%', '3PA', 'TRB', 'STL', 'BLK', 'MP']
-        for col in stat_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        df = df.drop_duplicates(subset='Player', keep='first')
+        df[stat_cols] = df[stat_cols].apply(pd.to_numeric, errors='coerce')
 
         print(f"Saving data to cache: {cache_filename}")
         df.to_csv(cache_filename, index=False)
@@ -54,21 +51,41 @@ def get_player_stats_df(year=2024):
         print(f"Error scraping data: {e}")
         return None
 
-def generate_scouting_report(player: PlayerStats) -> str:
+def calculate_percentile_rank(full_df, player_series, stat_col):
+    position = player_series['Pos'].split('-')[0] # Handles positions like 'C-PF'
+    
+    # Filter for players at the same position who have played meaningful minutes
+    positional_df = full_df[(full_df['Pos'].str.contains(position)) & (full_df['MP'] > 10)]
+    
+    if positional_df.empty:
+        return 50 # Return a default value if no comparable players are found
+
+    player_stat_value = player_series[stat_col]
+    
+    # Get all the stat values for that position
+    positional_stats = positional_df[stat_col].values
+    
+    # Calculate the percentile
+    percentile = percentileofscore(positional_stats, player_stat_value)
+    
+    return int(percentile)
+
+def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_series: pd.Series) -> str:
     report_lines = []
     
     report_lines.append("========================================")
-    report_lines.append(f"SCOUTING REPORT: {player.name}")
+    report_lines.append(f"SCOUTING REPORT: {player.name} ({player.position})")
     report_lines.append("========================================")
     
-    # Offensive Analysis
+    # --- Offensive Analysis ---
     report_lines.append("\nOFFENSE:")
-    if player.points_per_game >= 25.0:
-        report_lines.append("- An elite, go-to scoring option.")
-    elif player.points_per_game >= 18.0:
-        report_lines.append("- A strong and reliable secondary scorer.")
+    scoring_percentile = calculate_percentile_rank(full_df, player_series, 'PTS')
+    if scoring_percentile >= 90:
+        report_lines.append(f"- Elite scorer, ranking in the {scoring_percentile}th percentile for his position.")
+    elif scoring_percentile >= 70:
+        report_lines.append(f"- Strong scoring option ({scoring_percentile}th percentile for his position).")
     else:
-        report_lines.append("- Primarily a role player on offense.")
+        report_lines.append(f"- Not a primary scorer ({scoring_percentile}th percentile).")
 
     if player.three_point_percentage >= 0.38 and player.three_point_attempts_per_game >= 5:
         report_lines.append("- A lethal outside shooter on high volume.")
@@ -77,48 +94,39 @@ def generate_scouting_report(player: PlayerStats) -> str:
     else:
         report_lines.append("- Not a significant threat from three-point range.")
         
-    # Playmaking Analysis
+    # --- Playmaking Analysis ---
     report_lines.append("\nPLAYMAKING:")
-    if player.turnovers_per_game > 0:
-        atr = player.assists_per_game / player.turnovers_per_game
-        if atr >= 2.5:
-            report_lines.append("- Excellent decision-maker who protects the ball.")
-        elif atr >= 1.5:
-            report_lines.append("- Solid playmaker, but can be prone to mistakes.")
-        else:
-            report_lines.append("- Struggles with turnovers; not a primary creator.")
-    elif player.assists_per_game > 3.0:
-        report_lines.append("- Incredibly safe and effective playmaker.")
+    assist_percentile = calculate_percentile_rank(full_df, player_series, 'AST')
+    if assist_percentile >= 85:
+        report_lines.append(f"- Exceptional playmaker ({assist_percentile}th percentile in assists for his position).")
+    elif assist_percentile >= 60:
+         report_lines.append(f"- Good facilitator ({assist_percentile}th percentile in assists).")
     else:
-        report_lines.append("- Not a primary ball-handler.")
+        report_lines.append(f"- Primarily looks for his own shot ({assist_percentile}th percentile in assists).")
 
-    # Rebounding & Defense
+    # --- Rebounding & Defense ---
     report_lines.append("\nDEFENSE & REBOUNDING:")
-    if player.rebounds_per_game >= 10.0:
-        report_lines.append("- Dominant force on the glass.")
-    elif player.rebounds_per_game >= 7.0:
-        report_lines.append("- Strong positional rebounder.")
+    rebound_percentile = calculate_percentile_rank(full_df, player_series, 'TRB')
+    if rebound_percentile >= 90:
+        report_lines.append(f"- Dominant force on the glass ({rebound_percentile}th percentile for his position).")
+    elif rebound_percentile >= 70:
+        report_lines.append(f"- Strong positional rebounder ({rebound_percentile}th percentile).")
     else:
-        report_lines.append("- Average rebounder for his position.")
-    
-    combined_stocks = player.steals_per_game + player.blocks_per_game
-    if combined_stocks >= 3.0:
-        report_lines.append("- Elite, game-changing defensive playmaker.")
-    elif combined_stocks >= 1.5:
-        report_lines.append("- Positive contributor on the defensive end.")
-    else:
-        report_lines.append("- Not a major factor in creating turnovers or protecting the rim.")
+        report_lines.append(f"- Average rebounder for his position ({rebound_percentile}th percentile).")
 
     report_lines.append("\n--- END OF REPORT ---\n")
     return "\n".join(report_lines)
 
 def main():
+    """
+    Main function to drive the user interaction and report generation.
+    """
     selected_year = 0
     while True:
         try:
             year_input = input("Enter the season year to analyze (e.g., 2024 for the 2023-24 season): ")
             selected_year = int(year_input)
-            if 1950 <= selected_year <= 2025: # Basic validation for a reasonable year range
+            if 1950 <= selected_year <= 2025:
                 break
             else:
                 print("Please enter a year between 1950 and 2025.")
@@ -145,9 +153,15 @@ def main():
             player_data = stats_df[stats_df['Player'].str.lower() == player_name.lower()]
             
             if not player_data.empty:
-                p_series = player_data.iloc[0]
+                p_series = None
+                if 'TOT' in player_data['Tm'].values:
+                    p_series = player_data[player_data['Tm'] == 'TOT'].iloc[0]
+                else:
+                    p_series = player_data.iloc[0]
+
                 player_obj = PlayerStats(
                     name=p_series['Player'],
+                    pos=p_series['Pos'],
                     ppg=p_series['PTS'],
                     apg=p_series['AST'],
                     tov=p_series['TOV'],
@@ -157,7 +171,8 @@ def main():
                     spg=p_series['STL'],
                     bpg=p_series['BLK']
                 )
-                print(generate_scouting_report(player_obj))
+                # Pass the full DataFrame and the specific player's data series to the report generator
+                print(generate_scouting_report(player_obj, stats_df, p_series))
             else:
                 print(f"Player '{player_name}' not found.")
 
@@ -180,6 +195,7 @@ def main():
                 for index, p_series in player_list_df.iterrows():
                     player_obj = PlayerStats(
                         name=p_series['Player'],
+                        pos=p_series['Pos'],
                         ppg=p_series['PTS'],
                         apg=p_series['AST'],
                         tov=p_series['TOV'],
@@ -189,7 +205,7 @@ def main():
                         spg=p_series['STL'],
                         bpg=p_series['BLK']
                     )
-                    print(generate_scouting_report(player_obj))
+                    print(generate_scouting_report(player_obj, stats_df, p_series))
             else:
                 print(f"Team '{team_abbr}' not found.")
         
