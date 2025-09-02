@@ -2,6 +2,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 import io
+import os 
 
 class PlayerStats:
     def __init__(self, name, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg):
@@ -16,26 +17,37 @@ class PlayerStats:
         self.blocks_per_game = bpg
 
 def get_player_stats_df(year=2024):
+    cache_filename = f"nba_stats_{year}.csv"
+
+    # Check if the cached file already exists
+    if os.path.exists(cache_filename):
+        print(f"Loading data from local cache: {cache_filename}")
+        try:
+            # If it exists, load it directly from the CSV and return
+            df = pd.read_csv(cache_filename)
+            return df
+        except Exception as e:
+            print(f"Error reading cache file: {e}. Will re-scrape the data.")
+
+    # If cache doesn't exist, proceed with scraping
+    print(f"No local cache found for {year}. Scraping data from Basketball-Reference...")
     try:
         url = f"https://www.basketball-reference.com/leagues/NBA_{year}_per_game.html"
         response = requests.get(url)
-        response.raise_for_status() # Raise an exception for bad status codes
+        response.raise_for_status()
         
-        # Use pandas to read the HTML table directly, which is highly efficient
-        df = pd.read_html(io.StringIO(response.text), attrs = {'id': 'per_game_stats'})[0]
+        df = pd.read_html(io.StringIO(response.text), attrs={'id': 'per_game_stats'})[0]
         
         # Data Cleaning
-        df = df.drop(df[df['Player'] == 'Player'].index) # Remove repeated header rows
-        df = df.fillna(0) # Fill NaNs with 0, good for players with no attempts
-        
-        # Convert stat columns to numeric types
+        df = df.drop(df[df['Player'] == 'Player'].index)
+        df = df.fillna(0)
         stat_cols = ['PTS', 'AST', 'TOV', '3P%', '3PA', 'TRB', 'STL', 'BLK', 'MP']
         for col in stat_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        # Handle players traded mid-season (they have multiple rows)
-        # We will keep their 'TOT' (total) stat line and drop the individual team lines.
         df = df.drop_duplicates(subset='Player', keep='first')
+
+        print(f"Saving data to cache: {cache_filename}")
+        df.to_csv(cache_filename, index=False)
 
         return df
     except Exception as e:
@@ -49,7 +61,7 @@ def generate_scouting_report(player: PlayerStats) -> str:
     report_lines.append(f"SCOUTING REPORT: {player.name}")
     report_lines.append("========================================")
     
-    # --- Offensive Analysis ---
+    # Offensive Analysis
     report_lines.append("\nOFFENSE:")
     if player.points_per_game >= 25.0:
         report_lines.append("- An elite, go-to scoring option.")
@@ -65,7 +77,7 @@ def generate_scouting_report(player: PlayerStats) -> str:
     else:
         report_lines.append("- Not a significant threat from three-point range.")
         
-    # --- Playmaking Analysis ---
+    # Playmaking Analysis
     report_lines.append("\nPLAYMAKING:")
     if player.turnovers_per_game > 0:
         atr = player.assists_per_game / player.turnovers_per_game
@@ -80,7 +92,7 @@ def generate_scouting_report(player: PlayerStats) -> str:
     else:
         report_lines.append("- Not a primary ball-handler.")
 
-    # --- Rebounding & Defense ---
+    # Rebounding & Defense
     report_lines.append("\nDEFENSE & REBOUNDING:")
     if player.rebounds_per_game >= 10.0:
         report_lines.append("- Dominant force on the glass.")
@@ -101,17 +113,26 @@ def generate_scouting_report(player: PlayerStats) -> str:
     return "\n".join(report_lines)
 
 def main():
-    """
-    Main function to drive the user interaction and report generation.
-    """
-    print("Fetching latest player stats...")
-    stats_df = get_player_stats_df()
+    selected_year = 0
+    while True:
+        try:
+            year_input = input("Enter the season year to analyze (e.g., 2024 for the 2023-24 season): ")
+            selected_year = int(year_input)
+            if 1950 <= selected_year <= 2025: # Basic validation for a reasonable year range
+                break
+            else:
+                print("Please enter a year between 1950 and 2025.")
+        except ValueError:
+            print("Invalid input. Please enter a valid year.")
+
+    print(f"\n--- Loading data for the {selected_year-1}-{selected_year % 100} season ---")
+    stats_df = get_player_stats_df(year=selected_year)
     
     if stats_df is None:
         print("Could not retrieve player data. Exiting.")
         return
 
-    print("Data loaded successfully for the 2023-24 season.")
+    print(f"--- Data loaded successfully ---\n")
 
     while True:
         choice = input("Would you like to find a 'player' or a 'team'? (or type 'quit'): ").lower()
@@ -174,7 +195,6 @@ def main():
         
         else:
             print("Invalid input. Please enter 'player', 'team', or 'quit'.")
-
 
 if __name__ == "__main__":
     main()
