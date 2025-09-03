@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy
 
 class PlayerStats:
-    def __init__(self, name, pos, archetype, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg, per, ts_percentage, win_shares):
+    def __init__(self, name, pos, archetype, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg, per, ts_percentage, win_shares, pct_fga_0_3, fg_pct_0_3, pct_fga_3_10, fg_pct_3_10, pct_fga_10_16, fg_pct_10_16, pct_fga_16_3p, fg_pct_16_3p, pct_fga_3p, pct_3pa_corner):
         self.name = name
         self.position = pos
         self.archetype = archetype
@@ -25,6 +25,17 @@ class PlayerStats:
         self.per = per
         self.ts_percentage = ts_percentage
         self.win_shares = win_shares
+        self.pct_fga_0_3 = pct_fga_0_3
+        self.fg_pct_0_3 = fg_pct_0_3
+        self.pct_fga_3_10 = pct_fga_3_10
+        self.fg_pct_3_10 = fg_pct_3_10
+        self.pct_fga_10_16 = pct_fga_10_16
+        self.fg_pct_10_16 = fg_pct_10_16
+        self.pct_fga_16_3p = pct_fga_16_3p
+        self.fg_pct_16_3p = fg_pct_16_3p
+        self.pct_fga_3p = pct_fga_3p
+        self.pct_3pa_corner = pct_3pa_corner
+
 
 def get_player_stats_df(year=2024):
     cache_filename = f"nba_stats_{year}.csv"
@@ -118,6 +129,57 @@ def get_advanced_stats_df(year=2024):
         print(f"An unexpected error occurred in get_advanced_stats_df: {e}")
         return None
 
+def get_shooting_stats_df(year=2024):
+    cache_filename = f"nba_shooting_stats_{year}.csv"
+    
+    if os.path.exists(cache_filename):
+        print(f"Loading shooting data from local cache: {cache_filename}")
+        try:
+            df = pandas.read_csv(cache_filename)
+            if 'Tm' not in df.columns or 'Age' not in df.columns:
+                raise ValueError("Shooting stats cache is missing required columns.")
+            return df
+        except Exception as e:
+            print(f"Error reading cache file or cache is invalid: {e}. Deleting and re-scraping.")
+            os.remove(cache_filename)
+            
+    print(f"No local cache found for {year}. Scraping shooting data from Basketball-Reference...")
+    try:
+        url = f"https://www.basketball-reference.com/leagues/NBA_{year}_shooting.html"
+        response = requests.get(url)
+        response.raise_for_status()
+
+        html_text = response.text.replace('<!--', '').replace('-->', '')
+        
+        df = pandas.read_html(io.StringIO(html_text), attrs={'id': 'shooting_stats'})[0]
+
+        if isinstance(df.columns, pandas.MultiIndex):
+            new_cols = []
+            for col in df.columns:
+                if 'Unnamed' in col[0]:
+                    new_cols.append(col[1])
+                else:
+                    new_cols.append(f"{col[0]}_{col[1]}")
+            df.columns = new_cols
+        
+        df = df.drop(df[df['Player'] == 'Player'].index).reset_index(drop=True)
+        
+        if 'Team' in df.columns:
+            df = df.rename(columns={'Team': 'Tm'})
+
+        df = df.fillna(0)
+        df['Age'] = pandas.to_numeric(df['Age'], errors='coerce')
+        
+        stat_cols = [col for col in df.columns if '%' in col or 'Dist.' in col]
+        df[stat_cols] = df[stat_cols].apply(pandas.to_numeric, errors='coerce')
+
+        print(f"Saving shooting data to cache: {cache_filename}")
+        df.to_csv(cache_filename, index=False)
+
+        return df
+    except Exception as e:
+        print(f"An unexpected error occurred in get_shooting_stats_df: {e}")
+        return None
 
 def add_player_archetypes(df):
     stats_for_clustering = ['PTS', 'AST', 'TRB', 'STL', 'BLK', '3PA', 'FGA']
@@ -257,12 +319,39 @@ def generate_scouting_report(player: PlayerStats, full_df: pandas.DataFrame, pla
     else:
         report_lines.append(f"- Not a primary scorer ({scoring_percentile_league}th percentile among all players, {scoring_percentile_pos}th percentile for his position).")
 
-    if player.three_point_percentage >= 0.38 and player.three_point_attempts_per_game >= 5:
-        report_lines.append("- A lethal outside shooter on high volume.")
-    elif player.three_point_percentage >= 0.36:
-        report_lines.append("- A capable and efficient shooter from distance.")
-    else:
-        report_lines.append("- Not a significant threat from three-point range.")
+    if 'pct_fga_0_3' in player_series and player_series['pct_fga_0_3'] > 0:
+        report_lines.append("\nSHOOTING PROFILE:")
+        
+        is_efficient_rim = player.fg_pct_0_3 > 0.65
+        is_efficient_mid = player.fg_pct_10_16 > 0.43 or player.fg_pct_16_3p > 0.43
+        is_efficient_3p = player.three_point_percentage > 0.36
+        has_volume_mid = player.pct_fga_10_16 + player.pct_fga_16_3p > 0.20
+        has_volume_3p = player.pct_fga_3p > 0.30
+
+        if is_efficient_rim and is_efficient_mid and is_efficient_3p and has_volume_mid and has_volume_3p:
+            report_lines.append("- A true three-level threat who can score efficiently from all over the floor.")
+
+        if player.pct_fga_0_3 > 0.40:
+            report_lines.append(f"- Heavily relies on attacking the rim, taking {player.pct_fga_0_3:.1%} of shots inside 3 feet.")
+        elif player.pct_fga_3p > 0.50:
+            report_lines.append(f"- A three-point specialist, taking {player.pct_fga_3p:.1%} of his shots from beyond the arc.")
+
+        if player.fg_pct_0_3 > 0.70:
+            report_lines.append("- An elite finisher at the basket.")
+        elif player.fg_pct_0_3 < 0.55:
+            report_lines.append("- Struggles to finish effectively at the rim.")
+
+        mid_range_fga_pct = player.pct_fga_3_10 + player.pct_fga_10_16 + player.pct_fga_16_3p
+        if mid_range_fga_pct > 0.35:
+            mid_range_fg_pct_weighted = ((player.pct_fga_3_10 * player.fg_pct_3_10) + (player.pct_fga_10_16 * player.fg_pct_10_16) + (player.pct_fga_16_3p * player.fg_pct_16_3p)) / mid_range_fga_pct
+            if mid_range_fg_pct_weighted > 0.44:
+                report_lines.append("- A very effective mid-range shooter on high volume.")
+            elif mid_range_fg_pct_weighted < 0.38:
+                report_lines.append("- An inefficient scorer who settles for a lot of mid-range shots.")
+
+        if player.pct_3pa_corner > 0.30:
+            report_lines.append("- Often spots up in the corner, a key indicator of an off-ball role.")
+
         
     report_lines.append("\nPLAYMAKING:")
     assist_percentile_league = calculate_league_percentile_rank(full_df, player_series, 'AST')
@@ -337,7 +426,17 @@ def process_player_selection(p_series, stats_df):
         bpg=p_series['BLK'],
         per=p_series['PER'],
         ts_percentage=p_series['TS%'],
-        win_shares=p_series['WS']
+        win_shares=p_series['WS'],
+        pct_fga_0_3=p_series.get('%FGA by Distance_0-3', 0),
+        fg_pct_0_3=p_series.get('FG% by Distance_0-3', 0),
+        pct_fga_3_10=p_series.get('%FGA by Distance_3-10', 0),
+        fg_pct_3_10=p_series.get('FG% by Distance_3-10', 0),
+        pct_fga_10_16=p_series.get('%FGA by Distance_10-16', 0),
+        fg_pct_10_16=p_series.get('FG% by Distance_10-16', 0),
+        pct_fga_16_3p=p_series.get('%FGA by Distance_16-3p', 0),
+        fg_pct_16_3p=p_series.get('FG% by Distance_16-3p', 0),
+        pct_fga_3p=p_series.get('%FGA by Distance_3P', 0),
+        pct_3pa_corner=p_series.get('Corner 3s_% 3PA', 0)
     )
     print(generate_scouting_report(player_obj, stats_df, p_series))
     generate_comparison_chart(p_series, stats_df)
@@ -363,17 +462,25 @@ def main():
         return
 
     advanced_df = get_advanced_stats_df(year=selected_year)
+    shooting_df = get_shooting_stats_df(year=selected_year)
     
+    stats_df = per_game_df
     if advanced_df is not None:
         advanced_cols_to_merge = advanced_df[['Player', 'Tm', 'Age', 'PER', 'TS%', 'WS']]
-        stats_df = pandas.merge(per_game_df, advanced_cols_to_merge, on=['Player', 'Tm', 'Age'], how='left')
+        stats_df = pandas.merge(stats_df, advanced_cols_to_merge, on=['Player', 'Tm', 'Age'], how='left')
         stats_df[['PER', 'TS%', 'WS']] = stats_df[['PER', 'TS%', 'WS']].fillna(0)
     else:
         print("\nWarning: Could not retrieve advanced stats. Proceeding with basic stats only.\n")
-        stats_df = per_game_df
         stats_df['PER'] = 0
         stats_df['TS%'] = 0
         stats_df['WS'] = 0
+
+    if shooting_df is not None:
+        shooting_cols_to_merge = shooting_df.drop(columns=['Pos', 'G', 'MP', 'Rk'])
+        stats_df = pandas.merge(stats_df, shooting_cols_to_merge, on=['Player', 'Tm', 'Age'], how='left')
+        stats_df.fillna(0, inplace=True)
+    else:
+        print("\nWarning: Could not retrieve shooting stats. Reports will not include shooting profile.\n")
 
 
     stats_df = add_player_archetypes(stats_df)
@@ -434,23 +541,7 @@ def main():
                     continue
                 
                 for index, p_series in player_list_df.iterrows():
-                    player_obj = PlayerStats(
-                        name=p_series['Player'],
-                        pos=p_series['Pos'],
-                        archetype=p_series['Archetype'],
-                        ppg=p_series['PTS'],
-                        apg=p_series['AST'],
-                        tov=p_series['TOV'],
-                        three_p=p_series['3P%'],
-                        three_pa=p_series['3PA'],
-                        rpg=p_series['TRB'],
-                        spg=p_series['STL'],
-                        bpg=p_series['BLK'],
-                        per=p_series['PER'],
-                        ts_percentage=p_series['TS%'],
-                        win_shares=p_series['WS']
-                    )
-                    print(generate_scouting_report(player_obj, stats_df, p_series))
+                    process_player_selection(p_series, stats_df)
             else:
                 print(f"Team '{team_abbr}' not found.")
         
