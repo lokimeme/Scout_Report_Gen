@@ -1,6 +1,6 @@
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 import io
 import os
 from scipy.stats import percentileofscore
@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 class PlayerStats:
-    def __init__(self, name, pos, archetype, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg):
+    def __init__(self, name, pos, archetype, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg, per, ts_percentage, win_shares):
         self.name = name
         self.position = pos
         self.archetype = archetype
@@ -22,12 +22,15 @@ class PlayerStats:
         self.rebounds_per_game = rpg
         self.steals_per_game = spg
         self.blocks_per_game = bpg
+        self.per = per
+        self.ts_percentage = ts_percentage
+        self.win_shares = win_shares
 
 def get_player_stats_df(year=2024):
     cache_filename = f"nba_stats_{year}.csv"
 
     if os.path.exists(cache_filename):
-        print(f"Loading data from local cache: {cache_filename}")
+        print(f"Loading per-game data from local cache: {cache_filename}")
         try:
             df = pd.read_csv(cache_filename)
             if 'Tm' not in df.columns or 'Age' not in df.columns:
@@ -37,7 +40,7 @@ def get_player_stats_df(year=2024):
             print(f"Error reading cache file or cache is invalid: {e}. Deleting and re-scraping.")
             os.remove(cache_filename)
 
-    print(f"No local cache found for {year}. Scraping data from Basketball-Reference...")
+    print(f"No local cache found for {year}. Scraping per-game data from Basketball-Reference...")
     try:
         url = f"https://www.basketball-reference.com/leagues/NBA_{year}_per_game.html"
         response = requests.get(url)
@@ -62,13 +65,72 @@ def get_player_stats_df(year=2024):
         stat_cols = ['PTS', 'AST', 'TOV', '3P%', '3PA', 'TRB', 'STL', 'BLK', 'MP', 'FGA']
         df[stat_cols] = df[stat_cols].apply(pd.to_numeric, errors='coerce')
 
-        print(f"Saving data to cache: {cache_filename}")
+        print(f"Saving per-game data to cache: {cache_filename}")
         df.to_csv(cache_filename, index=False)
 
         return df
     except Exception as e:
         print(f"Error during scraping or data processing: {e}")
         return None
+
+def get_advanced_stats_df(year=2024):
+    cache_filename = f"nba_advanced_stats_{year}.csv"
+    
+    if os.path.exists(cache_filename):
+        print(f"Loading advanced data from local cache: {cache_filename}")
+        try:
+            df = pd.read_csv(cache_filename)
+            if 'Tm' not in df.columns or 'Age' not in df.columns:
+                raise ValueError("Advanced stats cache is missing required columns.")
+            return df
+        except Exception as e:
+            print(f"Error reading cache file or cache is invalid: {e}. Deleting and re-scraping.")
+            os.remove(cache_filename)
+            
+    print(f"No local cache found for {year}. Scraping advanced data from Basketball-Reference...")
+    try:
+        url = f"https://www.basketball-reference.com/leagues/NBA_{year}_advanced.html"
+        response = requests.get(url)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        table = soup.find('table', {'id': 'advanced_stats'})
+        if table is None:
+            comments = soup.find_all(string=lambda text: isinstance(text, Comment))
+            for comment in comments:
+                if 'id="advanced_stats"' in comment:
+                    soup_comment = BeautifulSoup(comment, 'html.parser')
+                    table = soup_comment.find('table', {'id': 'advanced_stats'})
+                    if table:
+                        break
+        
+        if table is None:
+            raise ValueError("Could not find the advanced_stats table in the HTML source.")
+            
+        df = pd.read_html(io.StringIO(str(table)))[0]
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(0)
+            
+        df = df.drop(df[df['Player'] == 'Player'].index)
+        
+        if 'Team' in df.columns:
+            df = df.rename(columns={'Team': 'Tm'})
+
+        df = df.fillna(0)
+        df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
+        stat_cols = ['PER', 'TS%', 'WS']
+        df[stat_cols] = df[stat_cols].apply(pd.to_numeric, errors='coerce')
+
+        print(f"Saving advanced data to cache: {cache_filename}")
+        df.to_csv(cache_filename, index=False)
+
+        return df
+    except Exception as e:
+        print(f"An unexpected error occurred in get_advanced_stats_df: {e}")
+        return None
+
 
 def add_player_archetypes(df):
     stats_for_clustering = ['PTS', 'AST', 'TRB', 'STL', 'BLK', '3PA', 'FGA']
@@ -219,6 +281,28 @@ def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_
         report_lines.append(f"- Strong rebounder for his role ({rebound_percentile}th percentile).")
     else:
         report_lines.append(f"- Average rebounder for his role ({rebound_percentile}th percentile).")
+    
+    if player.per > 0 or player.win_shares > 0:
+        report_lines.append("\nADVANCED METRICS:")
+        if player.per > 25.0:
+            report_lines.append(f"- MVP-level production with a PER of {player.per:.1f}.")
+        elif player.per > 20.0:
+            report_lines.append(f"- All-Star level impact with a PER of {player.per:.1f}.")
+        else:
+            report_lines.append(f"- Solid contributor with a PER of {player.per:.1f}.")
+
+        if player.ts_percentage > 0.600:
+            report_lines.append(f"- Hyper-efficient scorer (TS% of {player.ts_percentage:.3f}).")
+        elif player.ts_percentage > 0.570:
+            report_lines.append(f"- Efficient scoring option (TS% of {player.ts_percentage:.3f}).")
+        else:
+            report_lines.append(f"- League-average efficiency (TS% of {player.ts_percentage:.3f}).")
+            
+        if player.win_shares > 10.0:
+            report_lines.append(f"- Immense positive impact on winning ({player.win_shares:.1f} Win Shares).")
+        elif player.win_shares > 5.0:
+            report_lines.append(f"- Strong contributor to team success ({player.win_shares:.1f} Win Shares).")
+
 
     report_lines.append("\n--- END OF REPORT ---")
     return "\n".join(report_lines)
@@ -237,11 +321,25 @@ def main():
             print("Invalid input. Please enter a valid year.")
 
     print(f"\n--- Loading data for the {selected_year-1}-{selected_year % 100} season ---")
-    stats_df = get_player_stats_df(year=selected_year)
+    per_game_df = get_player_stats_df(year=selected_year)
     
-    if stats_df is None:
-        print("Could not retrieve player data. Exiting.")
+    if per_game_df is None:
+        print("Could not retrieve per-game player data. Exiting.")
         return
+
+    advanced_df = get_advanced_stats_df(year=selected_year)
+    
+    if advanced_df is not None:
+        advanced_cols_to_merge = advanced_df[['Player', 'Tm', 'Age', 'PER', 'TS%', 'WS']]
+        stats_df = pd.merge(per_game_df, advanced_cols_to_merge, on=['Player', 'Tm', 'Age'], how='left')
+        stats_df[['PER', 'TS%', 'WS']] = stats_df[['PER', 'TS%', 'WS']].fillna(0)
+    else:
+        print("\nWarning: Could not retrieve advanced stats. Proceeding with basic stats only.\n")
+        stats_df = per_game_df
+        stats_df['PER'] = 0
+        stats_df['TS%'] = 0
+        stats_df['WS'] = 0
+
 
     stats_df = add_player_archetypes(stats_df)
     print(f"--- Data loaded and archetypes identified successfully ---\n")
@@ -274,7 +372,10 @@ def main():
                     three_pa=p_series['3PA'],
                     rpg=p_series['TRB'],
                     spg=p_series['STL'],
-                    bpg=p_series['BLK']
+                    bpg=p_series['BLK'],
+                    per=p_series['PER'],
+                    ts_percentage=p_series['TS%'],
+                    win_shares=p_series['WS']
                 )
                 print(generate_scouting_report(player_obj, stats_df, p_series))
                 generate_comparison_chart(p_series, stats_df)
@@ -310,7 +411,10 @@ def main():
                         three_pa=p_series['3PA'],
                         rpg=p_series['TRB'],
                         spg=p_series['STL'],
-                        bpg=p_series['BLK']
+                        bpg=p_series['BLK'],
+                        per=p_series['PER'],
+                        ts_percentage=p_series['TS%'],
+                        win_shares=p_series['WS']
                     )
                     print(generate_scouting_report(player_obj, stats_df, p_series))
             else:
