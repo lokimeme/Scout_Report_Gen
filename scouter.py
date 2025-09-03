@@ -6,6 +6,8 @@ import os
 from scipy.stats import percentileofscore
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+import numpy as np
 
 class PlayerStats:
     def __init__(self, name, pos, archetype, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg):
@@ -28,9 +30,12 @@ def get_player_stats_df(year=2024):
         print(f"Loading data from local cache: {cache_filename}")
         try:
             df = pd.read_csv(cache_filename)
+            if 'Tm' not in df.columns or 'Age' not in df.columns:
+                 raise ValueError("Cache file is missing required columns.")
             return df
         except Exception as e:
-            print(f"Error reading cache file: {e}. Will re-scrape the data.")
+            print(f"Error reading cache file or cache is invalid: {e}. Deleting and re-scraping.")
+            os.remove(cache_filename)
 
     print(f"No local cache found for {year}. Scraping data from Basketball-Reference...")
     try:
@@ -40,8 +45,20 @@ def get_player_stats_df(year=2024):
         
         df = pd.read_html(io.StringIO(response.text), attrs={'id': 'per_game_stats'})[0]
         
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(0)
+
         df = df.drop(df[df['Player'] == 'Player'].index)
+        
+        if 'Team' in df.columns:
+            df = df.rename(columns={'Team': 'Tm'})
+            
+        required_cols = ['Player', 'Tm', 'Age']
+        if not all(col in df.columns for col in required_cols):
+             raise ValueError(f"Scraped data is missing one of the required columns: {required_cols}. Columns found: {df.columns.tolist()}")
+
         df = df.fillna(0)
+        df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
         stat_cols = ['PTS', 'AST', 'TOV', '3P%', '3PA', 'TRB', 'STL', 'BLK', 'MP', 'FGA']
         df[stat_cols] = df[stat_cols].apply(pd.to_numeric, errors='coerce')
 
@@ -50,7 +67,7 @@ def get_player_stats_df(year=2024):
 
         return df
     except Exception as e:
-        print(f"Error scraping data: {e}")
+        print(f"Error during scraping or data processing: {e}")
         return None
 
 def add_player_archetypes(df):
@@ -92,24 +109,74 @@ def add_player_archetypes(df):
             
     df_filtered['Archetype'] = df_filtered['Cluster'].map(archetype_map)
     
-    df = df.merge(df_filtered[['Player', 'Archetype']], on='Player', how='left')
+    archetype_series = df_filtered.set_index(['Player', 'Tm', 'Age'])['Archetype']
+
+    df_indexed = df.set_index(['Player', 'Tm', 'Age'])
+    
+    df['Archetype'] = df_indexed.index.map(archetype_series)
+    
     df['Archetype'] = df['Archetype'].fillna('Low-Minutes Player')
     
     return df
 
 def calculate_percentile_rank(full_df, player_series, stat_col):
-    position = player_series['Pos'].split('-')[0]
+    archetype = player_series['Archetype']
     
-    positional_df = full_df[(full_df['Pos'].str.contains(position)) & (full_df['MP'] > 10)]
+    archetype_df = full_df[(full_df['Archetype'] == archetype) & (full_df['MP'] > 10)]
     
-    if positional_df.empty:
+    if archetype_df.empty or len(archetype_df) < 2:
         return 50
 
     player_stat_value = player_series[stat_col]
-    positional_stats = positional_df[stat_col].values
-    percentile = percentileofscore(positional_stats, player_stat_value)
+    archetype_stats = archetype_df[stat_col].values
+    percentile = percentileofscore(archetype_stats, player_stat_value)
     
     return int(percentile)
+
+def generate_comparison_chart(player_series, full_df):
+    archetype = player_series['Archetype']
+    archetype_df = full_df[full_df['Archetype'] == archetype].copy()
+    
+    if archetype_df.empty:
+        print("Cannot generate chart: No other players of this archetype found.")
+        return
+    
+    rebound_percentile = calculate_percentile_rank(full_df, player_series, 'TRB')
+    assist_percentile = calculate_percentile_rank(full_df, player_series, 'AST')
+
+    if rebound_percentile > assist_percentile:
+        x_stat, y_stat = 'TRB', 'PTS'
+        x_label, y_label = 'Rebounds Per Game (RPG)', 'Points Per Game (PPG)'
+        title_profile = 'Scoring & Rebounding Profile'
+    else:
+        x_stat, y_stat = 'AST', 'PTS'
+        x_label, y_label = 'Assists Per Game (APG)', 'Points Per Game (PPG)'
+        title_profile = 'Offensive Profile'
+
+    top_players = archetype_df.sort_values(by=y_stat, ascending=False).head(10)
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    ax.scatter(top_players[x_stat], top_players[y_stat], color='blue', label=f'Top 10 "{archetype}" Players')
+
+    for i, player in top_players.iterrows():
+        ax.annotate(player['Player'], (player[x_stat], player[y_stat]), xytext=(5,-5), textcoords='offset points')
+
+    player_x = player_series[x_stat]
+    player_y = player_series[y_stat]
+    ax.scatter(player_x, player_y, color='red', s=150, zorder=5, label=player_series['Player'])
+    ax.annotate(player_series['Player'], (player_x, player_y), xytext=(5,-5), textcoords='offset points', weight='bold')
+
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(f"{title_profile} for '{archetype}' Archetype")
+    ax.legend()
+    ax.grid(True)
+
+    fig.tight_layout()
+    plt.savefig('scouting_report_chart.png')
+    plt.close()
+    print("\nComparison chart 'scouting_report_chart.png' has been saved.")
 
 def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_series: pd.Series) -> str:
     report_lines = []
@@ -122,9 +189,9 @@ def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_
     report_lines.append("\nOFFENSE:")
     scoring_percentile = calculate_percentile_rank(full_df, player_series, 'PTS')
     if scoring_percentile >= 90:
-        report_lines.append(f"- Elite scorer, ranking in the {scoring_percentile}th percentile for his position.")
+        report_lines.append(f"- Elite scorer, ranking in the {scoring_percentile}th percentile for his archetype.")
     elif scoring_percentile >= 70:
-        report_lines.append(f"- Strong scoring option ({scoring_percentile}th percentile for his position).")
+        report_lines.append(f"- Strong scoring option ({scoring_percentile}th percentile for his archetype).")
     else:
         report_lines.append(f"- Not a primary scorer ({scoring_percentile}th percentile).")
 
@@ -138,7 +205,7 @@ def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_
     report_lines.append("\nPLAYMAKING:")
     assist_percentile = calculate_percentile_rank(full_df, player_series, 'AST')
     if assist_percentile >= 85:
-        report_lines.append(f"- Exceptional playmaker ({assist_percentile}th percentile in assists for his position).")
+        report_lines.append(f"- Exceptional playmaker ({assist_percentile}th percentile in assists for his archetype).")
     elif assist_percentile >= 60:
          report_lines.append(f"- Good facilitator ({assist_percentile}th percentile in assists).")
     else:
@@ -147,13 +214,13 @@ def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_
     report_lines.append("\nDEFENSE & REBOUNDING:")
     rebound_percentile = calculate_percentile_rank(full_df, player_series, 'TRB')
     if rebound_percentile >= 90:
-        report_lines.append(f"- Dominant force on the glass ({rebound_percentile}th percentile for his position).")
+        report_lines.append(f"- Dominant force on the glass ({rebound_percentile}th percentile for his archetype).")
     elif rebound_percentile >= 70:
-        report_lines.append(f"- Strong positional rebounder ({rebound_percentile}th percentile).")
+        report_lines.append(f"- Strong rebounder for his role ({rebound_percentile}th percentile).")
     else:
-        report_lines.append(f"- Average rebounder for his position ({rebound_percentile}th percentile).")
+        report_lines.append(f"- Average rebounder for his role ({rebound_percentile}th percentile).")
 
-    report_lines.append("\n--- END OF REPORT ---\n")
+    report_lines.append("\n--- END OF REPORT ---")
     return "\n".join(report_lines)
 
 def main():
@@ -191,7 +258,7 @@ def main():
             
             if not player_data.empty:
                 p_series = None
-                if 'TOT' in player_data['Tm'].values:
+                if len(player_data) > 1 and 'TOT' in player_data['Tm'].values:
                     p_series = player_data[player_data['Tm'] == 'TOT'].iloc[0]
                 else:
                     p_series = player_data.iloc[0]
@@ -210,6 +277,8 @@ def main():
                     bpg=p_series['BLK']
                 )
                 print(generate_scouting_report(player_obj, stats_df, p_series))
+                generate_comparison_chart(p_series, stats_df)
+
             else:
                 print(f"Player '{player_name}' not found.")
 
