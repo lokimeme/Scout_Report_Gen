@@ -4,11 +4,14 @@ from bs4 import BeautifulSoup
 import io
 import os
 from scipy.stats import percentileofscore
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
 class PlayerStats:
-    def __init__(self, name, pos, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg):
+    def __init__(self, name, pos, archetype, ppg, apg, tov, three_p, three_pa, rpg, spg, bpg):
         self.name = name
         self.position = pos
+        self.archetype = archetype
         self.points_per_game = ppg
         self.assists_per_game = apg
         self.turnovers_per_game = tov
@@ -39,8 +42,7 @@ def get_player_stats_df(year=2024):
         
         df = df.drop(df[df['Player'] == 'Player'].index)
         df = df.fillna(0)
-        # Add 'Pos' to the columns being processed
-        stat_cols = ['PTS', 'AST', 'TOV', '3P%', '3PA', 'TRB', 'STL', 'BLK', 'MP']
+        stat_cols = ['PTS', 'AST', 'TOV', '3P%', '3PA', 'TRB', 'STL', 'BLK', 'MP', 'FGA']
         df[stat_cols] = df[stat_cols].apply(pd.to_numeric, errors='coerce')
 
         print(f"Saving data to cache: {cache_filename}")
@@ -51,21 +53,60 @@ def get_player_stats_df(year=2024):
         print(f"Error scraping data: {e}")
         return None
 
-def calculate_percentile_rank(full_df, player_series, stat_col):
-    position = player_series['Pos'].split('-')[0] # Handles positions like 'C-PF'
+def add_player_archetypes(df):
+    stats_for_clustering = ['PTS', 'AST', 'TRB', 'STL', 'BLK', '3PA', 'FGA']
     
-    # Filter for players at the same position who have played meaningful minutes
+    df_filtered = df[df['MP'] >= 15].copy()
+    
+    if df_filtered.empty:
+        df['Archetype'] = 'Uncategorized'
+        return df
+
+    scaler = StandardScaler()
+    scaled_stats = scaler.fit_transform(df_filtered[stats_for_clustering])
+    
+    kmeans = KMeans(n_clusters=8, random_state=42, n_init=10)
+    df_filtered['Cluster'] = kmeans.fit_predict(scaled_stats)
+    
+    cluster_centers = scaler.inverse_transform(kmeans.cluster_centers_)
+    cluster_profiles = pd.DataFrame(cluster_centers, columns=stats_for_clustering)
+    
+    archetype_map = {}
+    for i, row in cluster_profiles.iterrows():
+        if row['PTS'] >= 20 and row['AST'] >= 5:
+            archetype_map[i] = "Primary Offensive Engine"
+        elif row['BLK'] >= 1.5 or row['TRB'] >= 10:
+            archetype_map[i] = "Interior Defensive Anchor"
+        elif row['AST'] >= 6:
+            archetype_map[i] = "High-Volume Playmaker"
+        elif row['PTS'] >= 18:
+            archetype_map[i] = "Volume Scorer"
+        elif row['3PA'] >= 5 and row['STL'] >= 1:
+            archetype_map[i] = "3&D Wing"
+        elif row['TRB'] >= 7 and row['PTS'] >= 10:
+             archetype_map[i] = "Rebounding Forward"
+        elif row['PTS'] >= 10 and row['AST'] >= 3:
+            archetype_map[i] = "All-Around Contributor"
+        else:
+            archetype_map[i] = "Role Player"
+            
+    df_filtered['Archetype'] = df_filtered['Cluster'].map(archetype_map)
+    
+    df = df.merge(df_filtered[['Player', 'Archetype']], on='Player', how='left')
+    df['Archetype'] = df['Archetype'].fillna('Low-Minutes Player')
+    
+    return df
+
+def calculate_percentile_rank(full_df, player_series, stat_col):
+    position = player_series['Pos'].split('-')[0]
+    
     positional_df = full_df[(full_df['Pos'].str.contains(position)) & (full_df['MP'] > 10)]
     
     if positional_df.empty:
-        return 50 # Return a default value if no comparable players are found
+        return 50
 
     player_stat_value = player_series[stat_col]
-    
-    # Get all the stat values for that position
     positional_stats = positional_df[stat_col].values
-    
-    # Calculate the percentile
     percentile = percentileofscore(positional_stats, player_stat_value)
     
     return int(percentile)
@@ -75,9 +116,9 @@ def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_
     
     report_lines.append("========================================")
     report_lines.append(f"SCOUTING REPORT: {player.name} ({player.position})")
+    report_lines.append(f"PROJECTED ARCHETYPE: {player.archetype}")
     report_lines.append("========================================")
     
-    # --- Offensive Analysis ---
     report_lines.append("\nOFFENSE:")
     scoring_percentile = calculate_percentile_rank(full_df, player_series, 'PTS')
     if scoring_percentile >= 90:
@@ -94,7 +135,6 @@ def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_
     else:
         report_lines.append("- Not a significant threat from three-point range.")
         
-    # --- Playmaking Analysis ---
     report_lines.append("\nPLAYMAKING:")
     assist_percentile = calculate_percentile_rank(full_df, player_series, 'AST')
     if assist_percentile >= 85:
@@ -104,7 +144,6 @@ def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_
     else:
         report_lines.append(f"- Primarily looks for his own shot ({assist_percentile}th percentile in assists).")
 
-    # --- Rebounding & Defense ---
     report_lines.append("\nDEFENSE & REBOUNDING:")
     rebound_percentile = calculate_percentile_rank(full_df, player_series, 'TRB')
     if rebound_percentile >= 90:
@@ -118,9 +157,6 @@ def generate_scouting_report(player: PlayerStats, full_df: pd.DataFrame, player_
     return "\n".join(report_lines)
 
 def main():
-    """
-    Main function to drive the user interaction and report generation.
-    """
     selected_year = 0
     while True:
         try:
@@ -140,7 +176,8 @@ def main():
         print("Could not retrieve player data. Exiting.")
         return
 
-    print(f"--- Data loaded successfully ---\n")
+    stats_df = add_player_archetypes(stats_df)
+    print(f"--- Data loaded and archetypes identified successfully ---\n")
 
     while True:
         choice = input("Would you like to find a 'player' or a 'team'? (or type 'quit'): ").lower()
@@ -162,6 +199,7 @@ def main():
                 player_obj = PlayerStats(
                     name=p_series['Player'],
                     pos=p_series['Pos'],
+                    archetype=p_series['Archetype'],
                     ppg=p_series['PTS'],
                     apg=p_series['AST'],
                     tov=p_series['TOV'],
@@ -171,7 +209,6 @@ def main():
                     spg=p_series['STL'],
                     bpg=p_series['BLK']
                 )
-                # Pass the full DataFrame and the specific player's data series to the report generator
                 print(generate_scouting_report(player_obj, stats_df, p_series))
             else:
                 print(f"Player '{player_name}' not found.")
@@ -196,6 +233,7 @@ def main():
                     player_obj = PlayerStats(
                         name=p_series['Player'],
                         pos=p_series['Pos'],
+                        archetype=p_series['Archetype'],
                         ppg=p_series['PTS'],
                         apg=p_series['AST'],
                         tov=p_series['TOV'],
