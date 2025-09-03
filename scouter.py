@@ -92,28 +92,15 @@ def get_advanced_stats_df(year=2024):
         url = f"https://www.basketball-reference.com/leagues/NBA_{year}_advanced.html"
         response = requests.get(url)
         response.raise_for_status()
+
+        html_text = response.text.replace('<!--', '').replace('-->', '')
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        table = soup.find('table', {'id': 'advanced_stats'})
-        if table is None:
-            comments = soup.find_all(string=lambda text: isinstance(text, Comment))
-            for comment in comments:
-                if 'id="advanced_stats"' in comment:
-                    soup_comment = BeautifulSoup(comment, 'html.parser')
-                    table = soup_comment.find('table', {'id': 'advanced_stats'})
-                    if table:
-                        break
-        
-        if table is None:
-            raise ValueError("Could not find the advanced_stats table in the HTML source.")
-            
-        df = pd.read_html(io.StringIO(str(table)))[0]
+        df = pd.read_html(io.StringIO(html_text), attrs={'id': 'advanced'})[0]
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(0)
             
-        df = df.drop(df[df['Player'] == 'Player'].index)
+        df = df.drop(df[df['Player'] == 'Player'].index).reset_index(drop=True)
         
         if 'Team' in df.columns:
             df = df.rename(columns={'Team': 'Tm'})
@@ -425,5 +412,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
