@@ -343,7 +343,7 @@ def generate_scouting_report(player: PlayerStats, full_df: pandas.DataFrame, pla
 
         mid_range_fga_pct = player.pct_fga_3_10 + player.pct_fga_10_16 + player.pct_fga_16_3p
         if mid_range_fga_pct > 0.35:
-            mid_range_fg_pct_weighted = ((player.pct_fga_3_10 * player.fg_pct_3_10) + (player.pct_fga_10_16 * player.fg_pct_10_16) + (player.pct_fga_16_3p * player.fg_pct_16_3p)) / mid_range_fga_pct
+            mid_range_fg_pct_weighted = ((player.pct_fga_3_10 * player.fg_pct_3_10) + (player.pct_fga_10_16 * player.fg_pct_10_16) + (player.pct_fga_16_3p * player.fg_pct_16_3p)) / mid_range_fga_pct if mid_range_fga_pct > 0 else 0
             if mid_range_fg_pct_weighted > 0.44:
                 report_lines.append("- A very effective mid-range shooter on high volume.")
             elif mid_range_fg_pct_weighted < 0.38:
@@ -441,6 +441,70 @@ def process_player_selection(p_series, stats_df):
     print(generate_scouting_report(player_obj, stats_df, p_series))
     generate_comparison_chart(p_series, stats_df)
 
+def select_player(stats_df):
+    player_name_query = input("Enter a player's name or part of a name: ")
+    player_data = stats_df[stats_df['Player'].str.contains(player_name_query, case=False, na=False)].copy()
+    player_data = player_data.sort_values(by='Tm', ascending=False)
+    player_data = player_data.drop_duplicates(subset='Player', keep='first')
+
+    if player_data.empty:
+        print(f"No players found matching '{player_name_query}'.")
+        return None
+    elif len(player_data) == 1:
+        print(f"Found one player: {player_data.iloc[0]['Player']}")
+        return player_data.iloc[0]
+    else:
+        print("Multiple players found. Please select one:")
+        player_data = player_data.reset_index(drop=True)
+        for index, row in player_data.iterrows():
+            print(f"  {index + 1}: {row['Player']} ({row['Tm']})")
+        
+        while True:
+            try:
+                selection = int(input(f"Enter a number (1-{len(player_data)}): "))
+                if 1 <= selection <= len(player_data):
+                    return player_data.iloc[selection - 1]
+                else:
+                    print("Invalid number. Please try again.")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+    return None
+
+def display_comparison(p1_series, p2_series):
+    print("\n========================================")
+    print("PLAYER COMPARISON")
+    print("========================================")
+    
+    p1_name = p1_series['Player']
+    p2_name = p2_series['Player']
+
+    print(f"{'Stat':<15} | {p1_name:<25} | {p2_name:<25}")
+    print("-" * 67)
+
+    stats_to_show = {
+        'Archetype': 'Archetype',
+        'Points': 'PTS',
+        'Assists': 'AST',
+        'Rebounds': 'TRB',
+        'TS%': 'TS%',
+        'PER': 'PER',
+        'Win Shares': 'WS'
+    }
+
+    for display_name, stat_key in stats_to_show.items():
+        p1_stat = p1_series.get(stat_key, 'N/A')
+        p2_stat = p2_series.get(stat_key, 'N/A')
+        
+        if isinstance(p1_stat, float):
+            p1_stat = f"{p1_stat:.3f}" if stat_key == 'TS%' else f"{p1_stat:.1f}"
+        if isinstance(p2_stat, float):
+            p2_stat = f"{p2_stat:.3f}" if stat_key == 'TS%' else f"{p2_stat:.1f}"
+            
+        print(f"{display_name:<15} | {p1_stat:<25} | {p2_stat:<25}")
+    
+    print("-" * 67)
+
+
 def main():
     selected_year = 0
     while True:
@@ -487,42 +551,28 @@ def main():
     print(f"--- Data loaded and archetypes identified successfully ---\n")
 
     while True:
-        choice = input("Would you like to find a 'player' or a 'team'? (or type 'quit'): ").lower()
+        choice = input("Would you like to find a 'player', 'team', 'compare' players, or 'quit'? ").lower()
 
         if choice == 'quit':
             break
         
         elif choice == 'player':
-            player_name_query = input("Enter a player's name or part of a name: ")
-            
-            player_data = stats_df[stats_df['Player'].str.contains(player_name_query, case=False, na=False)].copy()
-            
-            player_data = player_data.sort_values(by='Tm', ascending=False)
-            player_data = player_data.drop_duplicates(subset='Player', keep='first')
-
-            if player_data.empty:
-                print(f"No players found matching '{player_name_query}'.")
-            elif len(player_data) == 1:
-                print(f"Found one player: {player_data.iloc[0]['Player']}")
-                p_series = player_data.iloc[0]
+            p_series = select_player(stats_df)
+            if p_series is not None:
                 process_player_selection(p_series, stats_df)
-            else:
-                print("Multiple players found. Please select one:")
-                player_data = player_data.reset_index(drop=True)
-                for index, row in player_data.iterrows():
-                    print(f"  {index + 1}: {row['Player']} ({row['Tm']})")
-                
-                while True:
-                    try:
-                        selection = int(input(f"Enter a number (1-{len(player_data)}): "))
-                        if 1 <= selection <= len(player_data):
-                            p_series = player_data.iloc[selection - 1]
-                            process_player_selection(p_series, stats_df)
-                            break
-                        else:
-                            print("Invalid number. Please try again.")
-                    except ValueError:
-                        print("Invalid input. Please enter a number.")
+
+        elif choice == 'compare':
+            print("\nSelect the first player to compare:")
+            p1_series = select_player(stats_df)
+            if p1_series is None:
+                continue
+
+            print("\nSelect the second player to compare:")
+            p2_series = select_player(stats_df)
+            if p2_series is None:
+                continue
+            
+            display_comparison(p1_series, p2_series)
 
         elif choice == 'team':
             team_abbr = input("Enter the 3-letter team abbreviation (e.g., LAL, GSW): ").upper()
@@ -546,7 +596,7 @@ def main():
                 print(f"Team '{team_abbr}' not found.")
         
         else:
-            print("Invalid input. Please enter 'player', 'team', or 'quit'.")
+            print("Invalid input. Please enter 'player', 'team', 'compare', or 'quit'.")
 
 if __name__ == "__main__":
     main()
