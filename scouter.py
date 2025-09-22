@@ -504,6 +504,42 @@ def display_comparison(p1_series, p2_series):
     
     print("-" * 67)
 
+def generate_head_to_head_chart(p1_series, p2_series):
+    stats_to_plot = {
+        'Points': 'PTS',
+        'Assists': 'AST',
+        'Rebounds': 'TRB',
+        'TS%': 'TS%',
+        'PER': 'PER',
+        'WS': 'WS'
+    }
+    
+    p1_stats = [p1_series.get(key, 0) for key in stats_to_plot.values()]
+    p2_stats = [p2_series.get(key, 0) for key in stats_to_plot.values()]
+    
+    labels = list(stats_to_plot.keys())
+    
+    x = numpy.arange(len(labels))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    rects1 = ax.bar(x - width/2, p1_stats, width, label=p1_series['Player'])
+    rects2 = ax.bar(x + width/2, p2_stats, width, label=p2_series['Player'])
+
+    ax.set_ylabel('Value')
+    ax.set_title(f"Head-to-Head Comparison: {p1_series['Player']} vs. {p2_series['Player']}")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.legend()
+
+    ax.bar_label(rects1, padding=3, fmt='%.2f')
+    ax.bar_label(rects2, padding=3, fmt='%.2f')
+
+    fig.tight_layout()
+    plt.savefig('player_comparison_chart.png')
+    plt.close()
+    print("\nComparison bar chart 'player_comparison_chart.png' has been saved.")
+
 
 def main():
     selected_year = 0
@@ -573,6 +609,7 @@ def main():
                 continue
             
             display_comparison(p1_series, p2_series)
+            generate_head_to_head_chart(p1_series, p2_series)
 
         elif choice == 'team':
             team_abbr = input("Enter the 3-letter team abbreviation (e.g., LAL, GSW): ").upper()
