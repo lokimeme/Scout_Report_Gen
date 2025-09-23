@@ -509,7 +509,6 @@ def generate_head_to_head_chart(p1_series, p2_series):
         'Points': 'PTS',
         'Assists': 'AST',
         'Rebounds': 'TRB',
-        'TS%': 'TS%',
         'PER': 'PER',
         'WS': 'WS'
     }
